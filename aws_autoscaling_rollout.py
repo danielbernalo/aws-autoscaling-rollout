@@ -24,8 +24,14 @@ class aws_autoscaling_rollout():
         self.old_instances = []
         try:
             self.autoscaling = boto3.client('autoscaling')
+            self.ec2 = boto3.client("ec2")
+            self.elb = boto3.client("elb")
+            self.elbv2 = boto3.client("elbv2")
         except:
             self.autoscaling = boto3.client('autoscaling', region_name=self.args.region)
+            self.ec2 = boto3.client("ec2", region_name=self.args.region)
+            self.elb = boto3.client("elb", region_name=self.args.region)
+            self.elbv2 = boto3.client("elbv2", region_name=self.args.region)
         
     def getAutoescaler(self, groupName):
         returnData = []
@@ -39,7 +45,7 @@ class aws_autoscaling_rollout():
             if 'AutoScalingGroups' in data:
                 returnData = data['AutoScalingGroups'][0] if len (data['AutoScalingGroups']) >0 else []
         except Exception as ex:
-            raise Exception("Error Autoscaling group not found [ %s ]. Exception: %s" %(groupName, ex))
+            raise Exception("ERROR: Autoscaling group not found [ %s ]. Exception: %s" %(groupName, ex))
 
         return returnData
 
@@ -49,12 +55,26 @@ class aws_autoscaling_rollout():
             autoscaler = self.getAutoescaler(autoscaler)
         if autoscaler is None:
             raise Exception("No AutoScaler set yet.")
-            return []
+
         
         
         self.old_instances =  autoscaler['Instances'] if 'Instances' in autoscaler else []
 
         return self.old_instances
+    
+    def getInstancesTarget(self, autoscaler):
+        
+        if autoscaler is str:
+            autoscaler = self.getAutoescaler(autoscaler)
+        if autoscaler is None:
+            raise Exception("No AutoScaler set yet.")
+
+        
+        
+        self.old_instances =  autoscaler['Instances'] if 'Instances' in autoscaler else []
+
+        return self.old_instances
+
 
     
     def setInfoAutoScaler(self, autoscaler):
@@ -63,7 +83,7 @@ class aws_autoscaling_rollout():
             autoscaler = self.getAutoescaler(autoscaler)
         if autoscaler is None:
             raise Exception("No AutoScaler set yet.")
-            return []
+
 
         try: self.max_size = int(autoscaler['MaxSize']) #Maxima
         except: self.max_size = 0
@@ -75,6 +95,7 @@ class aws_autoscaling_rollout():
         
         try: 
             self.cnt_instance = int(len(self.getInstancesAutoScaling(self.autoscaler)))
+            
         except:
             self.cnt_instance = 0
 
@@ -85,8 +106,45 @@ class aws_autoscaling_rollout():
         infoSetter['MinSize'] =  int(self.min_desired_temp)
         infoSetter['DesiredCapacity'] =  int(self.min_desired_temp)
         self.updatePolicitiesAutoScaling(self.args.name, ['OldestInstance','OldestLaunchConfiguration'] )
+        self.upateInstancesProtectedFromScaleIn(self.args.name, autoscaler)
+        #TODO: Test updateAutoScalingSuspendedProcesses
+        #self.updateAutoScalingSuspendedProcesses(self.args.name, autoscaler)
         return self.updateSettingsAutoScaling(self.args.name, infoSetter)
+
+    def updateAutoScalingSuspendedProcesses(self, group_name, autoscaler):
+        if autoscaler is str:
+            autoscaler = self.getAutoescaler(autoscaler)
+        if autoscaler is None:
+            raise Exception("No AutoScaler set yet.")
+
+        autoscaler.suspend_processes(
+            AutoScalingGroupName=group_name,
+            ScalingProcesses=[]
+        )
+        return True
     
+    def upateInstancesProtectedFromScaleIn(self, group_name, autoscaler):
+        if autoscaler is str:
+            autoscaler = self.getAutoescaler(autoscaler)
+        if autoscaler is None:
+            raise Exception("No AutoScaler set yet.")
+
+        instances = []
+        [ instances.append(x['InstanceId']) for x in self.getInstancesAutoScaling(autoscaler) ] 
+
+        response = self.autoscaling.set_instance_protection(
+            AutoScalingGroupName=group_name,
+            InstanceIds=instances,
+            ProtectedFromScaleIn=False,
+        )
+        if response['ResponseMetadata']['HTTPStatusCode'] == 200:
+            return True
+        else:
+            print("ERROR: when try update ProtectedFromScaleIn in Instances, please review yours credentials")
+            return False
+    
+
+        
     def updateSettingsAutoScaling(self, group_name, infoSetter ):
        
         response = self.autoscaling.update_auto_scaling_group(
@@ -98,7 +156,7 @@ class aws_autoscaling_rollout():
         if response['ResponseMetadata']['HTTPStatusCode'] == 200:
             return True
         else:
-            print("Error when try update info autoscaling group, please review yours credentials")
+            print("ERROR: when try update info autoscaling group, please review yours credentials")
             return False
     def updatePolicitiesAutoScaling(self, group_name, terms):
         response = self.autoscaling.update_auto_scaling_group(
@@ -108,7 +166,7 @@ class aws_autoscaling_rollout():
         if response['ResponseMetadata']['HTTPStatusCode'] == 200:
             return True
         else:
-            print("Error when try update info autoscaling group, please review yours credentials")
+            print("ERROR: when try update info autoscaling group, please review yours credentials")
             return False
 
     def getAutoescalerIntancesHaveHealthy(self, autoscaler):
@@ -117,10 +175,10 @@ class aws_autoscaling_rollout():
             autoscaler = self.getAutoescaler(autoscaler)
         if autoscaler is None:
             raise Exception("No AutoScaler set yet.")
-            return []
+
 
         for instance in autoscaler['Instances']:
-            if instance['HealthStatus'] == 'Healthy':
+            if instance['LifecycleState'] == 'InService':
                 healthy.append(instance)
         return healthy
 
@@ -132,7 +190,7 @@ class aws_autoscaling_rollout():
             MaxRecords=1
         )
         if len(autoscaler['AutoScalingGroups']) != 1:
-            print("Error unable to get describe autoscaling: [ %s ]" %(group_name))
+            print("ERROR: unable to get describe autoscaling: [ %s ]" %(group_name))
             exit(1)
         autoscaler = autoscaler['AutoScalingGroups'][0]
 
@@ -146,18 +204,79 @@ class aws_autoscaling_rollout():
     def waitAutoscalerWithNewInstancesHealthy(self, group_name):
         instances = self.getInstancesAutoScaling(self.autoscaler)
         if instances is None:
-            raise Exception("Error get Instances for autoscaling [ %s ]" %(group_name))
+            raise Exception("ERROR: get Instances for autoscaling [ %s ]" %(group_name))
         
         while True:
             instancesReady = int(len(self.getAutoescalerIntancesHaveHealthy(self.autoscaler)))
             if len(instances) != instancesReady:
-                print("WARN: Autoscaling in progress: %s to %s" %(instancesReady, len(instances)))
+                print("WARNING: Autoscaling in progress: %s to %s" %(instancesReady, len(instances)))
             elif self.getAutoscalerProgressStatus(self.args.name) is False:
-                print("WARN: Autoscaling currently performing, we should wait...")
+                print("WARNING: Autoscaling currently performing, we should wait...")
+            else:
+                print("SUCCESS: Autoscaling ready, desired is %s to %s" %(self.autoscaler['DesiredCapacity'], len(instances) ))
+                break
+            print("INFO: Waiting 3 seconds...")
+            
+            time.sleep(3)
+        return True
+    
+    def getTargetGroup(self, target_name):
+        try:
+                return self.elbv2.describe_target_health(
+                    TargetGroupArn=target_name,
+                )
+        except Exception as e:
+            raise Exception("Error searching for target group with name [ %s ]. %s" %(target_name, e))
+        raise Exception("No target group found with name [ %s ]" %(target_name))
+
+    def waitAutoscalerWithTargetARNHealthy(self, target_name):            
+
+        while True:
+            instances = self.getTargetGroup(target_name)
+            instances = instances['TargetHealthDescriptions']
+            instancesReady = 0
+            for instance in instances:
+                if instance['TargetHealth']['State'] == "healthy":
+                    instancesReady+=1
+
+            if len(instances) != instancesReady:
+                print("WARNING: TargetGroup in progress: %s to %s" %(instancesReady, len(instances)))
             else:
                 print("SUCCESS: Autoscaling ready, desired is %s to %s" %(instancesReady, len(instances) ))
                 break
-            print("Waiting 3 seconds...")
+
+            time.sleep(3)
+        return True
+    
+    def getLoadBalancer(self, elb_name ):
+        try:
+            response = self.elb.describe_load_balancers(
+                LoadBalancerNames=[
+                    elb_name,
+                ],
+                PageSize=1
+            )
+
+            if len(response['LoadBalancerDescriptions']) > 0:
+                return response['LoadBalancerDescriptions'][0]
+        except Exception as e:
+            raise Exception("Error searching for loadbalancer with name [ %s ]. %s" %(elb_name, e))
+        raise Exception("No loadbalancer found with name [ %s ]" %(elb_name))
+
+    def waitAutoscalerWithELBHealthy(self, elb_name):
+        instances = self.getLoadBalancer(elb_name)
+        instances = instances['InstanceStates']
+        while True:
+            count_healthy = 0
+            for x in instances:
+                if x['State'] != "InService":
+                    count_healthy+=1
+                    print("WARNING: Instances waiting for status  in healthy [ %s/%s ]" %(count_healthy, len(instances)))
+                    break
+            if count_healthy == 0:
+                print("INFO: All Instances Ready")
+                break
+            print("INFO: Waiting 3 seconds...")
             
             time.sleep(3)
         return True
@@ -165,18 +284,37 @@ class aws_autoscaling_rollout():
     def run(self):
         self.autoscaler = self.getAutoescaler(self.args.name)
         if self.autoscaler is False:
-            print("Error Autoscaling not set")
+            print("ERROR: Autoscaling not set")
             exit(1)
         
+        #Check ASG contains LB or TargetARNs setting
+        if 'TargetGroupARNs' in self.autoscaler:
+            self.targetName = self.autoscaler['TargetGroupARNs'][0] 
+            self.target = "elbv2"
+        else:
+            self.targetName  = self.autoscaler['LoadBalancerNames'][0]
+            self.target = "elb"
+
+        if not self.targetName:
+            print("ERROR: TargetGroupARNs or LoadBalancerNames is not setting, please review.")
+            exit(1)
+        
+
         if self.setInfoAutoScaler(self.autoscaler):
             self.waitAutoscalerWithNewInstancesHealthy(self.args.name)
+            if self.target == "elbv2":
+                self.waitAutoscalerWithTargetARNHealthy(self.targetName)
+            else:
+                self.waitAutoscalerWithELBHealthy(self.targetName)
+
             OldInfo = dict()
             OldInfo['MaxSize'] = self.max_size
             OldInfo['MinSize'] = self.min_size
             OldInfo['DesiredCapacity'] = self.desired_size
 
             if self.updateSettingsAutoScaling(self.args.name, OldInfo):
-                print("All Success.")
+                self.waitAutoscalerWithNewInstancesHealthy(self.args.name)
+                print("SUCCESS: All Success.")
 
 
 if __name__ == "__main__":
