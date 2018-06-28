@@ -107,8 +107,7 @@ class aws_autoscaling_rollout():
         infoSetter['DesiredCapacity'] =  int(self.min_desired_temp)
         self.updatePolicitiesAutoScaling(self.args.name, ['OldestInstance','OldestLaunchConfiguration'] )
         self.upateInstancesProtectedFromScaleIn(self.args.name, autoscaler)
-        #TODO: Test updateAutoScalingSuspendedProcesses
-        #self.updateAutoScalingSuspendedProcesses(self.args.name, autoscaler)
+        self.updateAutoScalingSuspendedProcesses(self.args.name, self.autoscaling)
         return self.updateSettingsAutoScaling(self.args.name, infoSetter)
 
     def updateAutoScalingSuspendedProcesses(self, group_name, autoscaler):
@@ -116,11 +115,12 @@ class aws_autoscaling_rollout():
             autoscaler = self.getAutoescaler(autoscaler)
         if autoscaler is None:
             raise Exception("No AutoScaler set yet.")
-
-        autoscaler.suspend_processes(
-            AutoScalingGroupName=group_name,
-            ScalingProcesses=[]
-        )
+        try:
+            autoscaler.resume_processes(
+                AutoScalingGroupName=group_name,
+            )
+        except Exception as e:
+            print("WARNING: Can't remove ScalingProcess == Terminate on Suspend_process. TRACE: %s" %(e))
         return True
     
     def upateInstancesProtectedFromScaleIn(self, group_name, autoscaler):
@@ -250,34 +250,28 @@ class aws_autoscaling_rollout():
     
     def getLoadBalancer(self, elb_name ):
         try:
-            response = self.elb.describe_load_balancers(
-                LoadBalancerNames=[
-                    elb_name,
-                ],
-                PageSize=1
+            return self.elb.describe_instance_health(
+                LoadBalancerName=elb_name,
             )
-
-            if len(response['LoadBalancerDescriptions']) > 0:
-                return response['LoadBalancerDescriptions'][0]
         except Exception as e:
             raise Exception("Error searching for loadbalancer with name [ %s ]. %s" %(elb_name, e))
         raise Exception("No loadbalancer found with name [ %s ]" %(elb_name))
 
     def waitAutoscalerWithELBHealthy(self, elb_name):
-        instances = self.getLoadBalancer(elb_name)
-        instances = instances['InstanceStates']
         while True:
-            count_healthy = 0
-            for x in instances:
-                if x['State'] != "InService":
-                    count_healthy+=1
-                    print("WARNING: Instances waiting for status  in healthy [ %s/%s ]" %(count_healthy, len(instances)))
-                    break
-            if count_healthy == 0:
-                print("INFO: All Instances Ready")
+            instances = self.getLoadBalancer(elb_name)
+            instances = instances['InstanceStates']
+            instancesReady = 0
+            for instance in instances:
+                if instance['State'] == "InService":
+                    instancesReady+=1
+
+            if len(instances) != instancesReady:
+                print("WARNING: ELB waiting to all instances all inService: %s to %s" %(instancesReady, len(instances)))
+            else:
+                print("SUCCESS: ELB ready, desired is %s to %s" %(instancesReady, len(instances) ))
                 break
-            print("INFO: Waiting 3 seconds...")
-            
+
             time.sleep(3)
         return True
 
@@ -288,14 +282,18 @@ class aws_autoscaling_rollout():
             exit(1)
         
         #Check ASG contains LB or TargetARNs setting
-        if 'TargetGroupARNs' in self.autoscaler:
-            self.targetName = self.autoscaler['TargetGroupARNs'][0] 
+        if len(self.autoscaler['TargetGroupARNs']) > 0:
+            self.targetName = self.autoscaler['TargetGroupARNs'][0]
             self.target = "elbv2"
-        else:
+        elif len(self.autoscaler['LoadBalancerNames']) > 0:
             self.targetName  = self.autoscaler['LoadBalancerNames'][0]
             self.target = "elb"
+        else:
+            print("ERROR: TargetGroupARNs or LoadBalancerNames is not setting, please review.")
+            exit(1)
 
-        if not self.targetName:
+
+        if not self.targetName or not self.target:
             print("ERROR: TargetGroupARNs or LoadBalancerNames is not setting, please review.")
             exit(1)
         
@@ -319,7 +317,7 @@ class aws_autoscaling_rollout():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="AutoScaling for DLA Services")
+        description="AutoScaling Services")
 
     parser.add_argument('--name', help="auto-scaling-group Name")
     parser.add_argument('--region', help="name of region")
