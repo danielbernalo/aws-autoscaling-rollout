@@ -1,5 +1,6 @@
 # AWS Autoscaling Rollout
 
+
 ## Introducion:
 aws-autoscaling-rollout permite la sustitución de alta disponibilidad/sin tiempo de inactividad, de todas las instancias EC2 en un grupo de escalamiento automático (que se puede conectar a un ELB). 
 Hace esto de manera "rodante", escala la misma cantidad de equipos que estan funcionando y luego desescala. 
@@ -23,3 +24,6 @@ export AWS_ACCESS_KEY_ID="${AWS_KEY_ID}" ; export AWS_SECRET_ACCESS_KEY="${AWS_S
   Especificar nombre de ASG
 ### --region
   Especificar region de AWS
+  
+  Inspiración:
+  https://github.com/AndrewFarley/farley-aws-missing-tools.git
