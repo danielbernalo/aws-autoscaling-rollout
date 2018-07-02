@@ -46,7 +46,8 @@ class aws_autoscaling_rollout():
                 returnData = data['AutoScalingGroups'][0] if len (data['AutoScalingGroups']) >0 else []
         except Exception as ex:
             raise Exception("ERROR: Autoscaling group not found [ %s ]. Exception: %s" %(groupName, ex))
-
+        
+        if (self.args.debug=="verbose"): print("DEBUG: %s. RETURN: %s " %(sys._getframe().f_code.co_name,returnData))
         return returnData
 
     def getInstancesAutoScaling(self, autoscaler):
@@ -57,26 +58,13 @@ class aws_autoscaling_rollout():
             raise Exception("No AutoScaler set yet.")
 
         
-        
-        self.old_instances =  autoscaler['Instances'] if 'Instances' in autoscaler else []
-
+        self.old_instances = old_instances = []
+        old_instances =  autoscaler['Instances'] if 'Instances' in autoscaler else []
+        [ self.old_instances.append(instance) for instance in old_instances if instance['LifecycleState'] != 'Terminating' ]
+        if (self.args.debug=="verbose"): print("DEBUG: %s. RETURN: %s " %(sys._getframe().f_code.co_name,self.old_instances))
         return self.old_instances
     
-    def getInstancesTarget(self, autoscaler):
-        
-        if autoscaler is str:
-            autoscaler = self.getAutoescaler(autoscaler)
-        if autoscaler is None:
-            raise Exception("No AutoScaler set yet.")
 
-        
-        
-        self.old_instances =  autoscaler['Instances'] if 'Instances' in autoscaler else []
-
-        return self.old_instances
-
-
-    
     def setInfoAutoScaler(self, autoscaler):
         infoSetter = dict()
         if autoscaler is str:
@@ -105,10 +93,13 @@ class aws_autoscaling_rollout():
         infoSetter['MaxSize'] = int(self.min_desired_temp +1) if self.min_desired_temp > self.max_size else self.max_size
         infoSetter['MinSize'] =  int(self.min_desired_temp)
         infoSetter['DesiredCapacity'] =  int(self.min_desired_temp)
-        self.updatePolicitiesAutoScaling(self.args.name, ['OldestInstance','OldestLaunchConfiguration'] )
-        self.upateInstancesProtectedFromScaleIn(self.args.name, autoscaler)
-        self.updateAutoScalingSuspendedProcesses(self.args.name, self.autoscaling)
-        return self.updateSettingsAutoScaling(self.args.name, infoSetter)
+        policities = self.updatePolicitiesAutoScaling(self.args.name, ['OldestInstance','OldestLaunchConfiguration'] )
+        protected  = self.upateInstancesProtectedFromScaleIn(self.args.name, autoscaler)
+        processes  = self.updateAutoScalingSuspendedProcesses(self.args.name, self.autoscaling)
+        infoASG    = self.updateSettingsAutoScaling(self.args.name, infoSetter)
+        if (self.args.debug=="verbose"): print("DEBUG: %s. RETURN: Setting Policities: [ %s ].  ProtectedFromScaleIn [ %s ]. SuspendedProcesses: [ %s ]. SettingsAutoScaling [ %s ]" %(sys._getframe().f_code.co_name,policities, protected, processes, infoASG))
+        
+        return infoASG
 
     def updateAutoScalingSuspendedProcesses(self, group_name, autoscaler):
         if autoscaler is str:
@@ -180,6 +171,7 @@ class aws_autoscaling_rollout():
         for instance in autoscaler['Instances']:
             if instance['LifecycleState'] == 'InService':
                 healthy.append(instance)
+        if (self.args.debug=="verbose"): print("DEBUG: %s. RETURN: %s" %(sys._getframe().f_code.co_name,healthy))
         return healthy
 
     def getAutoscalerProgressStatus( self, group_name ):
@@ -202,12 +194,19 @@ class aws_autoscaling_rollout():
         return True
         
     def waitAutoscalerWithNewInstancesHealthy(self, group_name):
-        instances = self.getInstancesAutoScaling(self.autoscaler)
+        instances = self.getInstancesAutoScaling(self.getAutoescaler(self.args.name))
+        if (self.args.debug=="critical"): print("DEBUG: %s. RETURN: %s" %("instances",instances))
+
         if instances is None:
             raise Exception("ERROR: get Instances for autoscaling [ %s ]" %(group_name))
         
         while True:
-            instancesReady = int(len(self.getAutoescalerIntancesHaveHealthy(self.autoscaler)))
+            instances = self.getInstancesAutoScaling(self.getAutoescaler(self.args.name))
+            if (self.args.debug=="critical"): print("DEBUG: %s. RETURN: %s" %("instancesTotal",instances))
+            
+            instancesReady = int(len(self.getAutoescalerIntancesHaveHealthy(self.getAutoescaler(self.args.name))))
+            if (self.args.debug=="critical"): print("DEBUG: %s. RETURN: %s" %("instancesReady",self.getAutoescalerIntancesHaveHealthy(self.autoscaler)))
+
             if len(instances) != instancesReady:
                 print("WARNING: Autoscaling in progress: %s to %s" %(instancesReady, len(instances)))
             elif self.getAutoscalerProgressStatus(self.args.name) is False:
@@ -232,8 +231,11 @@ class aws_autoscaling_rollout():
     def waitAutoscalerWithTargetARNHealthy(self, target_name):            
 
         while True:
-            instances = self.getTargetGroup(target_name)
-            instances = instances['TargetHealthDescriptions']
+            instances = []
+            instances_all = self.getTargetGroup(target_name)
+            instances_all = instances_all['TargetHealthDescriptions']
+            [ instances.append(instance) for instance in instances_all if instance['TargetHealth']['State'] != "draining" ]
+            if (self.args.debug=="critical"): print("DEBUG: %s. RETURN: %s" %("instancesTargetGroup",instances))
             instancesReady = 0
             for instance in instances:
                 if instance['TargetHealth']['State'] == "healthy":
@@ -261,6 +263,7 @@ class aws_autoscaling_rollout():
         while True:
             instances = self.getLoadBalancer(elb_name)
             instances = instances['InstanceStates']
+            if (self.args.debug=="critical"): print("DEBUG: %s. RETURN: %s" %("instancesELB",instances))
             instancesReady = 0
             for instance in instances:
                 if instance['State'] == "InService":
@@ -321,9 +324,9 @@ if __name__ == "__main__":
 
     parser.add_argument('--name', help="auto-scaling-group Name")
     parser.add_argument('--region', help="name of region")
+    parser.add_argument('--debug', help="show request to aws-cli: [verbose or critical]", default="none",  choices=["verbose", "critical", "none"])
 
     args = parser.parse_args()
-    print(args)
     app = aws_autoscaling_rollout(args)
 
     app.run()
